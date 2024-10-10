@@ -19,13 +19,17 @@ RE_PROTEIN_PUTATIVE = re.compile(r'(potential|possible|probable|predicted)', fla
 RE_PROTEIN_NODE = re.compile(r'NODE_', flags=re.IGNORECASE)
 RE_PROTEIN_POTENTIAL_CONTIG_NAME = re.compile(r'(genome|shotgun)', flags=re.IGNORECASE)
 RE_PROTEIN_DOMAIN_CONTAINING = re.compile(r'domain-containing protein', flags=re.IGNORECASE)
+RE_PROTEIN_REMNANT = re.compile(r'Remnant of ', re.IGNORECASE)
+RE_PROTEIN_TMRNA = re.compile(r'TmRNA', flags=re.IGNORECASE)
 RE_PROTEIN_NO_LETTERS = re.compile(r'[^A-Za-z]')
-RE_PROTEIN_SUSPECT_CHARS = re.compile(r'[.@=?%]')
+RE_PROTEIN_SUSPECT_CHARS_DISCARD = re.compile(r'[.#]')
+RE_PROTEIN_SUSPECT_CHARS_REPLACE = re.compile(r'[@=?%]')
+RE_PROTEIN_SUSPECT_CHARS_BEGINNING = '_\-+.:,;/\\\''
 RE_PROTEIN_PERIOD_SEPARATOR = re.compile(r'([a-zA-Z0-9]+)\.([a-zA-Z0-9]+)')
 RE_PROTEIN_WRONG_PRIMES = re.compile(r'[\u2032\u0060\u00B4]')  # prime (′), grave accent (`), acute accent (´)
 RE_PROTEIN_WEIGHT = re.compile(r' [0-9]+(?:\.[0-9]+)? k?da ', flags=re.IGNORECASE)
 RE_PROTEIN_SYMBOL = re.compile(r'[A-Z][a-z]{2}[A-Z][0-9]?')
-RE_DOMAIN_OF_UNKNOWN_FUCTION = re.compile(r'(DUF\d{3,4})', flags=re.IGNORECASE)
+RE_DOMAIN_OF_UNKNOWN_FUNCTION = re.compile(r'(DUF\d{3,4})', flags=re.IGNORECASE)
 RE_UNCHARACTERIZED_PROTEIN_FAMILY = re.compile(r'(UPF\d{3,4})', flags=re.IGNORECASE)
 RE_GENE_CAPITALIZED = re.compile(r'^[A-Z].+', flags=re.DOTALL)
 RE_GENE_SUSPECT_CHARS = re.compile(r'[\?]', flags=re.DOTALL)
@@ -101,18 +105,17 @@ def combine_annotation(feature: dict):
             product = ips_product
         for db_xref in ips['db_xrefs']:
             db_xrefs.add(db_xref)
-    rank = 0
-    for hit in expert_hits:
-        db_xrefs.update(hit.get('db_xrefs', []))
-        expert_rank = hit['rank']
-        if(expert_rank > rank):
-            expert_genes = hit.get('gene', None)
-            if(expert_genes):
-                expert_genes = expert_genes.replace('/', ',').split(',')
-                genes.update(expert_genes)
-                gene = expert_genes[0]
-            product = hit.get('product', None)
-            rank = expert_rank
+
+    if(len(expert_hits) > 0):
+        top_expert_hit = sorted(expert_hits,key=lambda k: (k['rank'], k.get('score', 0), calc_annotation_score(k)), reverse=True)[0]
+        expert_genes = top_expert_hit.get('gene', None)
+        if(expert_genes):
+            expert_genes = expert_genes.replace('/', ',').split(',')
+            genes.update(expert_genes)
+            gene = expert_genes[0]
+        product = top_expert_hit.get('product', None)
+        for hit in expert_hits:
+            db_xrefs.update(hit.get('db_xrefs', []))
 
     if(product):
         product = revise_cds_product(product)
@@ -285,21 +288,39 @@ def detect_feature_overlaps(genome: dict):
                     )
             # user-provided CDS overlaps
             for cds_user_provided in contig_cdss_user_provided[contig['id']]:
-                if(cds['stop'] < cds_user_provided['start'] or cds['start'] > cds_user_provided['stop']):
-                    continue
-                else:  # overlap -> remove cds
-                    overlap = min(cds['stop'], cds_user_provided['stop']) - max(cds['start'], cds_user_provided['start']) + 1
-                    if(overlap > bc.CDS_MAX_OVERLAPS):
-                        overlap = f"[{max(cds['start'], cds_user_provided['start'])},{min(cds['stop'], cds_user_provided['stop'])}]"
-                        cds['discarded'] = {
-                            'type': bc.DISCARD_TYPE_OVERLAP,
-                            'feature_type': bc.FEATURE_CDS,
-                            'description': f'overlaps {bc.FEATURE_CDS} at {overlap}'
-                        }
-                        log.info(
-                            "overlap: de novo CDS (%s/%s) [%i, %i] overlapping user-provided CDS [%i, %i], %s, contig=%s",
-                            cds.get('gene', '-'), cds.get('product', '-'), cds['start'], cds['stop'], cds_user_provided['start'], cds_user_provided['stop'], overlap, cds['contig']
-                        )
+                overlap = 0
+                if(not cds_user_provided.get('edge', False)  and  not cds.get('edge', False)):  # both CDS not edge features
+                    if(cds['stop'] < cds_user_provided['start'] or cds['start'] > cds_user_provided['stop']):
+                        continue
+                    else:
+                        overlap = min(cds['stop'], cds_user_provided['stop']) - max(cds['start'], cds_user_provided['start']) + 1
+                elif(cds_user_provided.get('edge', False)  and  not cds.get('edge', False)):  # only user-provided CDS edge feature
+                    if(cds['stop'] > cds_user_provided['start']):  # overlapping de-novo CDS at sequence end
+                        overlap = cds['stop'] - max(cds['start'], cds_user_provided['start']) + 1
+                    elif(cds['start'] < cds_user_provided['stop']):  # overlapping de-novo CDS at sequence start
+                        overlap = min(cds['stop'], cds_user_provided['stop']) - cds['start'] + 1
+                    else:
+                        continue
+                elif(not cds_user_provided.get('edge', False)  and  cds.get('edge', False)):  # only de-novo CDS edge feature
+                    if(cds_user_provided['stop'] > cds['start']):  # overlapping user-provided CDS at sequence end
+                        overlap = cds_user_provided['stop'] - max(cds['start'], cds_user_provided['start']) + 1
+                    elif(cds_user_provided['start'] < cds['stop']):  # overlapping user-provided CDS at sequence start
+                        overlap = min(cds['stop'], cds_user_provided['stop']) - cds_user_provided['start'] + 1
+                    else:
+                        continue
+                elif(cds_user_provided.get('edge', False)  and  cds.get('edge', False)):  # both CDS edge features
+                    overlap = (contig['length'] - max(cds['start'], cds_user_provided['start']) + 1) + min(cds['stop'], cds_user_provided['stop'])
+                if(overlap > bc.CDS_MAX_OVERLAPS):
+                    overlap = f"[{max(cds['start'], cds_user_provided['start'])},{min(cds['stop'], cds_user_provided['stop'])}]"
+                    cds['discarded'] = {
+                        'type': bc.DISCARD_TYPE_OVERLAP,
+                        'feature_type': bc.FEATURE_CDS,
+                        'description': f'overlaps user-provided {bc.FEATURE_CDS} at {overlap}'
+                    }
+                    log.info(
+                        "overlap: de-novo CDS (%s/%s) [%i, %i] overlapping user-provided CDS [%i, %i], %s, contig=%s",
+                        cds.get('gene', '-'), cds.get('product', '-'), cds['start'], cds['stop'], cds_user_provided['start'], cds_user_provided['stop'], overlap, cds['contig']
+                    )
 
         # remove sORF overlapping with tRNAs, tmRNAs, rRNAs, CRISPRs, inframe CDSs, shorter inframe sORFs
         for sorf in contig_sorfs[contig['id']]:
@@ -386,8 +407,8 @@ def detect_feature_overlaps(genome: dict):
                 elif(sorf['start'] == overlap_sorf['start'] and sorf['stop'] == overlap_sorf['stop']):
                     continue  # same
                 else:  # overlap -> remove sorf
-                    score_sorf = calc_sorf_annotation_score(sorf)
-                    score_overlap_sorf = calc_sorf_annotation_score(overlap_sorf)
+                    score_sorf = calc_cds_annotation_score(sorf)
+                    score_overlap_sorf = calc_cds_annotation_score(overlap_sorf)
 
                     if(score_sorf < score_overlap_sorf):  # lower annotation score
                         overlap = f"[{max(sorf['start'], overlap_sorf['start'])},{min(sorf['stop'], overlap_sorf['stop'])}]"
@@ -413,36 +434,35 @@ def detect_feature_overlaps(genome: dict):
                         )
 
 
-def calc_sorf_annotation_score(sorf: dict) -> int:
+def calc_cds_annotation_score(cds: dict) -> int:
     """Calc an annotation score rewarding each identification & annotation"""
     score = 0
 
-    if('ups' in sorf):
+    if('ups' in cds):
         score += 1
 
-    ips = sorf.get('ips', None)
+    ips = cds.get('ips', None)
     if(ips):
         score += 1
-        ips_gene = ips.get('gene', None)
-        if(ips_gene):
-            score += 1
-        ips_product = ips.get('product', None)
-        if(ips_product):
-            score += 1
+        score += calc_annotation_score(ips)
 
-    psc = sorf.get('psc', None)
+    psc = cds.get('psc', None)
     if(psc):
         score += 1
-        psc_gene = psc.get('gene', None)
-        if(psc_gene):
-            score += 1
-        psc_product = psc.get('product', None)
-        if(psc_product):
-            score += 1
+        score += calc_annotation_score(psc)
     log.debug(
-        'sorf score: contig=%s, start=%i, stop=%i, gene=%s, product=%s, score=%i',
-        sorf['contig'], sorf['start'], sorf['stop'], sorf.get('gene', '-'), sorf.get('product', '-'), score
+        'cds score: contig=%s, start=%i, stop=%i, gene=%s, product=%s, score=%i',
+        cds['contig'], cds['start'], cds['stop'], cds.get('gene', '-'), cds.get('product', '-'), score
     )
+    return score
+
+
+def calc_annotation_score(orf:dict) -> int:
+    score = 0
+    if(orf.get('gene', None)):
+        score += 1
+    if(orf.get('product', None)):
+        score += 1
     return score
 
 
@@ -520,9 +540,19 @@ def revise_cds_product(product: str):
     product = re.sub(RE_PROTEIN_PERIOD_SEPARATOR, r'\1-\2', product)  # replace separator periods
     if(product != old_product):
         log.info('fix product: replace separator periods. new=%s, old=%s', product, old_product)
+    
+    old_product = product
+    if(product[0] in RE_PROTEIN_SUSPECT_CHARS_BEGINNING):  # remove suspect first character
+        product = product[1:]
+        log.info('fix product: replace invalid first character. new=%s, old=%s', product, old_product)
 
     old_product = product
-    product = RE_PROTEIN_SUSPECT_CHARS.sub('', product)  # remove suspect characters
+    product = RE_PROTEIN_SUSPECT_CHARS_DISCARD.sub('', product)  # remove suspect characters
+    if(product != old_product):
+        log.info('fix product: replace invalid characters. new=%s, old=%s', product, old_product)
+
+    old_product = product
+    product = RE_PROTEIN_SUSPECT_CHARS_REPLACE.sub(' ', product)  # replace suspect characters by single whitespace
     if(product != old_product):
         log.info('fix product: replace invalid characters. new=%s, old=%s', product, old_product)
 
@@ -537,8 +567,13 @@ def revise_cds_product(product: str):
         log.info('fix product: replace FOG ids. new=%s, old=%s', product, old_product)
 
     old_product = product
+    product = RE_PROTEIN_REMNANT.sub('', product)  # remove 'Remnant of's
+    if(product != old_product):
+        log.info('fix product: replace remnant ofs. new=%s, old=%s', product, old_product)
+
+    old_product = product
     dufs = []  # replace DUF-containing products
-    for m in RE_DOMAIN_OF_UNKNOWN_FUCTION.finditer(product):
+    for m in RE_DOMAIN_OF_UNKNOWN_FUNCTION.finditer(product):
         dufs.append(m.group(1).upper())
     if(len(dufs) >= 1):
         product = f"{' '.join(dufs)} domain{'s' if len(dufs) > 1 else ''}-containing protein"
@@ -577,6 +612,11 @@ def revise_cds_product(product: str):
         product = product.replace('_', '-')
         if(product != old_product):
             log.info('fix product: replace domain name underscores. new=%s, old=%s', product, old_product)
+    
+    old_product = product
+    if(RE_PROTEIN_TMRNA.fullmatch(product)):
+        product = ''
+        log.info('fix product: discard pure tmRNA product descriptions. new=%s, old=%s', product, old_product)
 
     old_product = product
     if(

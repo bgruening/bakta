@@ -2,7 +2,6 @@ import logging
 import multiprocessing as mp
 import os
 import re
-import shutil
 import sys
 import tempfile
 
@@ -50,10 +49,12 @@ translation_table = None
 keep_contig_headers = None
 locus = None
 locus_tag = None
+locus_tag_increment = None
 gram = None
 replicons = None
 compliant = None
 user_proteins = None
+user_hmms = None
 meta = None
 regions = None
 
@@ -69,6 +70,7 @@ skip_pseudo = None
 skip_sorf = None
 skip_gap = None
 skip_ori = None
+skip_filter = None
 skip_plot = None
 
 run_start = datetime.now()
@@ -161,7 +163,7 @@ def setup(args):
         taxon = None
 
     # annotation configurations
-    global complete, prodigal_tf, translation_table, keep_contig_headers, locus, locus_tag, gram, replicons, compliant, user_proteins, meta, regions
+    global complete, prodigal_tf, translation_table, keep_contig_headers, locus, locus_tag, locus_tag_increment, gram, replicons, compliant, user_proteins, user_hmms, meta, regions
     complete = args.complete
     log.info('complete=%s', complete)
     prodigal_tf = args.prodigal_tf
@@ -217,6 +219,8 @@ def setup(args):
                 log.error("Invalid 'locus-tag' parameter! locus-tag=%s", locus_tag)
                 sys.exit(f"ERROR: invalid 'locus-tag' parameter ({locus_tag})!\nLocus tag prefixes must contain between 1 and 24 alphanumeric characters or '_.-' signs.")
     log.info('locus-tag=%s', locus_tag)
+    locus_tag_increment = args.locus_tag_increment
+    log.info('locus-tag-increment=%s', locus_tag_increment)
     keep_contig_headers = args.keep_contig_headers
     log.info('keep_contig_headers=%s', keep_contig_headers)
     replicons = args.replicons
@@ -233,6 +237,19 @@ def setup(args):
             sys.exit(f'ERROR: replicon table file ({replicons}) not valid!')
     log.info('replicon-table=%s', replicons)
     user_proteins = check_user_proteins(args)
+    user_hmms = args.hmms
+    if(user_hmms is not None):
+        try:
+            if(user_hmms == ''):
+                raise ValueError('File path argument must be non-empty')
+            user_hmms_path = Path(user_hmms).resolve()
+            check_readability('HMM', user_hmms_path)
+            check_content_size('HMM', user_hmms_path)
+            user_hmms = user_hmms_path
+        except:
+            log.error('provided HMM file not valid! path=%s', user_hmms)
+            sys.exit(f'ERROR: HMM file ({user_hmms}) not valid!')
+
     regions = args.regions
     if(regions is not None):
         try:
@@ -249,7 +266,7 @@ def setup(args):
     
 
     # workflow configurations
-    global skip_trna, skip_tmrna, skip_rrna, skip_ncrna, skip_ncrna_region, skip_crispr, skip_cds, skip_pseudo, skip_sorf, skip_gap, skip_ori, skip_plot
+    global skip_trna, skip_tmrna, skip_rrna, skip_ncrna, skip_ncrna_region, skip_crispr, skip_cds, skip_pseudo, skip_sorf, skip_gap, skip_ori, skip_filter, skip_plot
     skip_trna = args.skip_trna
     log.info('skip-tRNA=%s', skip_trna)
     skip_tmrna = args.skip_tmrna
@@ -272,6 +289,8 @@ def setup(args):
     log.info('skip-gap=%s', skip_gap)
     skip_ori = args.skip_ori
     log.info('skip-ori=%s', skip_ori)
+    skip_filter = args.skip_filter
+    log.info('skip-filter=%s', skip_filter)
     skip_plot = args.skip_plot
     log.info('skip-plot=%s', skip_plot)
 
